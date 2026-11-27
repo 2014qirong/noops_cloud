@@ -1,7 +1,7 @@
 from aiops_agent.adapters.base import ActionResult, CloudAction, CloudAdapter, ActionRisk
 from aiops_agent.adapters.registry import AdapterRegistry
 from aiops_agent.graph.graph import build_graph, run_agent
-from aiops_agent.production.eval_stub import run_golden_set
+from aiops_agent.production.eval import run_eval
 
 
 def test_read_path_k8s_pods():
@@ -85,6 +85,7 @@ def test_graph_compiles():
 
 
 def test_golden_set_smoke():
-    results = run_golden_set(lambda text: run_agent(text, hitl_callback=lambda _p: False))
+    results, metrics = run_eval()
     failed = [r for r in results if not r.passed]
-    assert not failed, {r.case_id: r.details for r in failed}
+    assert not failed, {r.case_id: r.failures for r in failed}
+    assert metrics.total == len(results)

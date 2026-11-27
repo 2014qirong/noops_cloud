@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 from aiops_agent.adapters.registry import DEFAULT_REGISTRY
 from aiops_agent.graph.graph import run_agent
-from aiops_agent.production.eval_stub import run_golden_set
+from aiops_agent.production.eval import GOLDEN_SET, run_eval, write_report
 
 
 def _approve_all(payload: dict) -> bool:
@@ -31,7 +32,21 @@ def main(argv: list[str] | None = None) -> int:
         help="HITL policy for high-risk writes (default: none → deny)",
     )
     parser.add_argument("--catalog", action="store_true", help="Print adapter action catalog")
-    parser.add_argument("--eval", action="store_true", help="Run golden-set eval stub")
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run golden-set evaluation harness (deterministic; no cloud/LLM keys)",
+    )
+    parser.add_argument(
+        "--report-dir",
+        default="artifacts",
+        help="Directory for eval report JSON/Markdown (default: artifacts/)",
+    )
+    parser.add_argument(
+        "--category",
+        default=None,
+        help="Optional golden-set category filter (guardrail|read|write_hitl|provider|observer)",
+    )
     parser.add_argument("--json", action="store_true", help="Emit full JSON result")
     args = parser.parse_args(argv)
 
@@ -40,15 +55,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.eval:
-        def _runner(text: str) -> dict:
-            return run_agent(text, hitl_callback=_deny_all)
-
-        results = run_golden_set(_runner)
-        payload = [
-            {"id": r.case_id, "passed": r.passed, "details": r.details} for r in results
-        ]
-        print(json.dumps(payload, indent=2))
-        return 0 if all(r.passed for r in results) else 1
+        cases = GOLDEN_SET
+        if args.category:
+            cases = [c for c in GOLDEN_SET if c.category == args.category]
+            if not cases:
+                print(f"No cases for category={args.category!r}", file=sys.stderr)
+                return 2
+        results, metrics = run_eval(cases)
+        paths = write_report(results, metrics, output_dir=Path(args.report_dir))
+        payload = {
+            "metrics": metrics.to_dict(),
+            "results": [
+                {"id": r.case_id, "passed": r.passed, "failures": r.failures, "checks": r.checks}
+                for r in results
+            ],
+            "report": {k: str(v) for k, v in paths.items()},
+        }
+        print(json.dumps(payload, indent=2, default=str))
+        print(
+            f"\nEval: {metrics.passed}/{metrics.total} passed "
+            f"(rate={metrics.pass_rate:.1%}); "
+            f"reports → {paths['json']}, {paths['markdown']}",
+            file=sys.stderr,
+        )
+        return 0 if metrics.failed == 0 else 1
 
     if not args.prompt:
         parser.error("prompt is required unless --catalog / --eval")
@@ -61,7 +91,6 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_agent(args.prompt, hitl_callback=hitl_cb)
     if args.json:
-        # hitl_callback is not serializable; already stripped in run_agent return
         print(json.dumps(result, indent=2, default=str))
     else:
         print(result.get("conclusion"))
