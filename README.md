@@ -45,10 +45,9 @@ aiops "Show me pods that are crashing in namespace default"
 aiops "Restart the api deployment in default namespace" --hitl approve
 aiops "Scale the AWS ASG web-asg capacity" --hitl deny
 
-# Full JSON + catalog + golden-set eval
+# Full JSON + catalog
 aiops "List AWS CloudWatch alarms" --json
 aiops --catalog
-aiops --eval
 
 # Or module form
 python -m aiops_agent "List Azure Monitor alerts"
@@ -65,6 +64,68 @@ python -m aiops_agent "List Azure Monitor alerts"
 
 Without credentials, adapters return **deterministic stubs** (`stub=True`) so the graph, risk, and HITL paths stay testable offline. Register custom adapters via `AdapterRegistry.register(...)`.
 
+## Evaluation (Golden Set)
+
+Offline harness under `src/aiops_agent/production/eval/`. Uses the **rule-based planner** (deterministic / fake-LLM) and stub adapters — **no cloud credentials or paid API keys** required for CI.
+
+### Run
+
+```bash
+# Full harness + JSON/Markdown report under artifacts/
+aiops --eval
+aiops --eval --report-dir artifacts
+aiops --eval --category guardrail   # optional filter
+
+# Pytest (includes full golden-set pass)
+pytest -q
+pytest -q tests/test_eval.py
+```
+
+### Metrics
+
+The report includes:
+
+- **Pass rate** — fraction of golden cases that meet all expectations
+- **Provider accuracy** — correct AWS/Azure/GCP/K8s routing when asserted
+- **HITL / risk / fallback correctness** — write-path and degrade checks
+- **Guardrail TP/FP/TN/FN** — injection blocks vs benign false positives
+
+Artifacts: `artifacts/eval-report.json` and `artifacts/eval-report.md`.
+
+### Add a case
+
+1. Open `src/aiops_agent/production/eval/cases.py`.
+2. Append a `GoldenCase(...)` to the matching category list (`_GUARDRAIL_CASES`, `_READ_CASES`, `_HITL_CASES`, `_PROVIDER_CASES`, `_OBSERVER_CASES`).
+3. Set only the expectations you care about (`None` = do not assert).
+4. For HITL, set `hitl_policy` to `"approve"` or `"deny"`.
+5. For Observer retry paths, set `fixture` to `"flaky_k8s"` or `"always_fail_k8s"` (see `eval/fixtures.py`).
+6. Run `aiops --eval` / `pytest -q tests/test_eval.py`.
+
+Example:
+
+```python
+GoldenCase(
+    id="read-aws-alarms-custom",
+    input="List AWS CloudWatch alarms that are firing",
+    category="read",
+    tags=["aws", "read"],
+    expect_provider="aws",
+    expect_action_contains="describe_alarms",
+    expect_risk_decision="execute",
+    expect_fallback=False,
+)
+```
+
+Library usage:
+
+```python
+from aiops_agent.production.eval import run_eval, write_report
+
+results, metrics = run_eval()
+write_report(results, metrics, output_dir="artifacts")
+print(metrics.pass_rate, metrics.provider_accuracy)
+```
+
 ## Production scaffolding
 
 Under `src/aiops_agent/production/`:
@@ -72,8 +133,8 @@ Under `src/aiops_agent/production/`:
 - **Timeouts / model switch** — `TimeoutPolicy`, `maybe_switch_model` (SOP fallback model id)
 - **Token budget + cache** — `TokenBudget`, `ResponseCache`
 - **Tracing** — `Tracer` protocol, `InMemoryTracer` / `NoOpTracer` (LangSmith-shaped)
-- **Golden-set eval** — `GOLDEN_SET` + `run_golden_set` (`aiops --eval`)
-- **Shadow mode** — `compare_shadow`, `AIOPS_SHADOW_MODE=1`
+- **Golden-set eval** — `production/eval/` harness (`aiops --eval`)
+- **Shadow mode** — stub only (`compare_shadow`, `AIOPS_SHADOW_MODE=1`); full pipeline is TODO
 
 ## Tests
 
@@ -82,7 +143,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-Coverage focus: graph happy path, injection block, risk gate, HITL approve/deny, observer retry, adapter stubs.
+Coverage focus: graph happy path, injection block, risk gate, HITL approve/deny, observer retry, adapter stubs, golden-set eval harness.
 
 ## Library usage
 
@@ -106,7 +167,10 @@ src/aiops_agent/
   guardrails/        # input desensitization / injection; output evidence
   risk/              # risk gate + whitelist / blocklist
   graph/             # LangGraph state, nodes, planner, compile
-  production/        # timeouts, budget, tracing, eval, shadow
+  production/
+    eval/            # golden set, runner, metrics, report, fixtures
+    shadow.py        # shadow mode stub (TODO)
+    ...
   cli.py
 tests/
 ```

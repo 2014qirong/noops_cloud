@@ -1,4 +1,9 @@
-"""Shadow mode stub — compare candidate plan vs production without side effects."""
+"""Shadow mode stub — compare candidate plan vs production without side effects.
+
+TODO: Expand into a full shadow pipeline (async candidate graph, traffic
+mirroring, divergence alerts). Out of scope for the golden-set eval PR —
+keep this module as a minimal stub only.
+"""
 
 from __future__ import annotations
 
