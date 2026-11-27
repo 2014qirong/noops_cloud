@@ -171,6 +171,57 @@ def hitl_node(state: AgentState) -> dict[str, Any]:
     return updates
 
 
+def shadow_propose_node(state: AgentState) -> dict[str, Any]:
+    """Shadow Mode: record a high-risk write proposal without executing it.
+
+    Observes the planned action (provider/action/params/risk) and marks it
+    suppressed so no mutating cloud side effect occurs.
+    """
+    provider = state.get("provider")
+    action_name = state.get("action")
+    params = state.get("action_params") or {}
+    detail = {
+        "mode": "shadow",
+        "proposed": True,
+        "suppressed": True,
+        "provider": provider,
+        "action": action_name,
+        "params": params,
+        "would_require_hitl": True,
+        "risk_reason": state.get("risk_reason"),
+    }
+    evidence = _append_evidence(
+        state,
+        EvidenceItem(
+            step="shadow_propose",
+            provider=provider,
+            action=action_name,
+            detail=detail,
+            ok=True,
+        ),
+    )
+    return {
+        "shadow_proposed": True,
+        "shadow_suppressed": True,
+        "hitl_approved": None,
+        "execution_ok": True,
+        "execution_result": {
+            "ok": True,
+            "mode": "shadow",
+            "proposed": True,
+            "suppressed": True,
+            "provider": provider,
+            "action": action_name,
+            "params": params,
+            "would_require_hitl": True,
+        },
+        "observer_notes": (
+            "Shadow mode: high-risk write proposed and recorded; side effect suppressed."
+        ),
+        "evidence": evidence,
+    }
+
+
 def executor_node(
     state: AgentState,
     *,
@@ -184,6 +235,37 @@ def executor_node(
     try:
         adapter, action = registry.resolve(provider, action_name)
         action = replace(action, params={**action.params, **params})
+        # Defense in depth: never execute mutating actions while shadowing.
+        if state.get("shadow_mode") and (action.mutating or action.risk.value == "high"):
+            evidence = _append_evidence(
+                state,
+                EvidenceItem(
+                    step="executor",
+                    provider=provider,
+                    action=action_name,
+                    detail={
+                        "mode": "shadow",
+                        "suppressed": True,
+                        "reason": "mutating/high-risk blocked in shadow mode",
+                    },
+                    ok=True,
+                ),
+            )
+            return {
+                "shadow_proposed": True,
+                "shadow_suppressed": True,
+                "execution_ok": True,
+                "execution_result": {
+                    "ok": True,
+                    "mode": "shadow",
+                    "proposed": True,
+                    "suppressed": True,
+                    "provider": provider,
+                    "action": action_name,
+                    "params": params,
+                },
+                "evidence": evidence,
+            }
         result = adapter.execute(action)
     except Exception as exc:  # noqa: BLE001 — surface as execution failure for Observer
         evidence = _append_evidence(
@@ -327,6 +409,15 @@ def output_node(state: AgentState) -> dict[str, Any]:
 
     if state.get("blocked"):
         conclusion = state.get("conclusion") or f"Blocked: {state.get('block_reason')}"
+    elif state.get("shadow_suppressed") or (
+        state.get("shadow_mode") and (state.get("execution_result") or {}).get("mode") == "shadow"
+    ):
+        provider = state.get("provider")
+        action = state.get("action")
+        conclusion = (
+            f"Shadow mode: proposed {provider}:{action} without executing write side effects. "
+            f"Risk={state.get('risk_decision')}. See evidence chain."
+        )
     elif state.get("is_fallback") and not state.get("execution_result", {}).get("sop"):
         conclusion = (
             state.get("observer_notes")
@@ -374,6 +465,9 @@ def route_after_risk(state: AgentState) -> str:
     if decision == RiskDecision.EXECUTE.value:
         return "executor"
     if decision == RiskDecision.HITL.value:
+        # Shadow Mode: propose + record writes; skip live HITL / execute.
+        if state.get("shadow_mode"):
+            return "shadow_propose"
         return "hitl"
     return "fallback"
 
