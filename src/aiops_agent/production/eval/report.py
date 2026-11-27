@@ -26,7 +26,7 @@ def build_report_payload(
         "notes": [
             "Runner uses the rule-based planner (deterministic / fake-LLM).",
             "Adapters return stubs without cloud credentials.",
-            "Shadow Mode remains a stub/TODO and is not exercised here.",
+            "Shadow Mode is a separate harness (`aiops --shadow`); golden eval is unchanged.",
         ],
     }
 

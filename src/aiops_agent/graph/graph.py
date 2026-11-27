@@ -25,6 +25,7 @@ from aiops_agent.graph.nodes import (
     route_after_input,
     route_after_observer,
     route_after_risk,
+    shadow_propose_node,
 )
 from aiops_agent.graph.state import AgentState
 from aiops_agent.production.token_budget import TokenBudget
@@ -45,6 +46,7 @@ def build_graph(
     graph.add_node("planner", partial(planner_node, registry=registry))
     graph.add_node("risk_gate", partial(risk_gate_node, registry=registry))
     graph.add_node("hitl", hitl_node)
+    graph.add_node("shadow_propose", shadow_propose_node)
     graph.add_node("executor", partial(executor_node, registry=registry))
     graph.add_node("fallback", fallback_node)
     graph.add_node("observer", observer_node)
@@ -60,13 +62,19 @@ def build_graph(
     graph.add_conditional_edges(
         "risk_gate",
         route_after_risk,
-        {"executor": "executor", "hitl": "hitl", "fallback": "fallback"},
+        {
+            "executor": "executor",
+            "hitl": "hitl",
+            "shadow_propose": "shadow_propose",
+            "fallback": "fallback",
+        },
     )
     graph.add_conditional_edges(
         "hitl",
         route_after_hitl,
         {"executor": "executor", "fallback": "fallback"},
     )
+    graph.add_edge("shadow_propose", "observer")
     graph.add_edge("executor", "observer")
     graph.add_edge("fallback", "observer")
     graph.add_conditional_edges(
@@ -87,8 +95,13 @@ def run_agent(
     max_retries: int = 1,
     tracer: Tracer | None = None,
     token_budget: TokenBudget | None = None,
+    shadow_mode: bool = False,
 ) -> dict[str, Any]:
-    """Run one closed-loop turn and return a flat result dict for CLI / evals."""
+    """Run one closed-loop turn and return a flat result dict for CLI / evals.
+
+    When ``shadow_mode`` is True, high-risk/write actions are proposed and
+    recorded but never executed; safe read/low-risk actions may still run.
+    """
     registry = registry or DEFAULT_REGISTRY
     tracer = tracer or NoOpTracer()
     budget = token_budget or TokenBudget()
@@ -115,9 +128,17 @@ def run_agent(
         "is_fallback": False,
         "blocked": False,
         "should_retry": False,
+        "shadow_mode": shadow_mode,
+        "shadow_proposed": False,
+        "shadow_suppressed": False,
     }
     final: AgentState = app.invoke(initial)
-    tracer.event("aiops.completed", risk=final.get("risk_decision"), fallback=final.get("is_fallback"))
+    tracer.event(
+        "aiops.completed",
+        risk=final.get("risk_decision"),
+        fallback=final.get("is_fallback"),
+        shadow=shadow_mode,
+    )
     tracer.end_span(span, status="ok")
 
     output = final.get("output") or {}
@@ -127,6 +148,7 @@ def run_agent(
         "warnings": final.get("warnings") or [],
         "provider": final.get("provider"),
         "action": final.get("action"),
+        "action_params": final.get("action_params") or (final.get("plan") or {}).get("params") or {},
         "plan": final.get("plan"),
         "risk_decision": final.get("risk_decision"),
         "risk_reason": final.get("risk_reason"),
@@ -139,6 +161,9 @@ def run_agent(
         "retry_count": final.get("retry_count") or 0,
         "redactions": final.get("redactions") or 0,
         "token_used": budget.used,
+        "shadow_mode": bool(final.get("shadow_mode") or shadow_mode),
+        "shadow_proposed": bool(final.get("shadow_proposed")),
+        "shadow_suppressed": bool(final.get("shadow_suppressed")),
         "output": output,
         "adapter_status": registry.status(),
     }

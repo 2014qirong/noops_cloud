@@ -53,3 +53,8 @@ class AgentState(TypedDict, total=False):
     # Production
     token_used: int
     trace_events: list[dict[str, Any]]
+
+    # Shadow Mode — propose + record; suppress high-risk/write side effects
+    shadow_mode: bool
+    shadow_proposed: bool
+    shadow_suppressed: bool
